@@ -66,7 +66,7 @@ FName::FName(const void* Ptr)
 
 void FName::Init(bool bForceGNames)
 {
-	constexpr std::array<const char*, 5> PossibleSigs = 
+	constexpr std::array<const char*, 7> PossibleSigs = 
 	{ 
 		"48 8D ? ? 48 8D ? ? E8",
 		"48 8D ? ? ? 48 8D ? ? E8",
@@ -74,6 +74,7 @@ void FName::Init(bool bForceGNames)
 		"48 8D ? ? ? 49 8B ? E8",
 		"48 8D ? ? 48 8B ? E8",
 		"48 8D ? ? ? 48 8B ? E8",
+		"48 89 ? 4C 89 ? E8" // The Outlast Trials (+ release-4-0-CL-192745)
 	};
 
 	MemAddress StringRef = FindByStringInAllSections("ForwardShadingQuality_");
