@@ -948,59 +948,76 @@ inline MemAddress FindByWString(const wchar_t* RefStr)
 template<bool bCheckIfLeaIsStrPtr = false, typename CharType = char>
 inline MemAddress FindByStringInAllSections(const CharType* RefStr, uintptr_t StartAddress = 0x0, int32_t Range = 0x0)
 {
-	static_assert(std::is_same_v<CharType, char> || std::is_same_v<CharType, wchar_t>, "FindByStringInAllSections only supports 'char' and 'wchar_t', but was called with other type.");
-
-	/* Stop scanning when arriving 0x10 bytes before the end of the memory range */
-	constexpr int32_t OffsetFromMemoryEnd = 0x10;
+	static_assert(std::is_same_v<CharType, char> || std::is_same_v<CharType, wchar_t>,
+		"FindByStringInAllSections only supports 'char' and 'wchar_t'.");
 
 	const auto [ImageBase, ImageSize] = GetImageBaseAndSize();
+	uintptr_t ImageEnd = ImageBase + ImageSize;
 
-	const uintptr_t ImageEnd = ImageBase + ImageSize;
-
-	/* If the StartAddress is not default nullptr, and is out of memory-range */
 	if (StartAddress != 0x0 && (StartAddress < ImageBase || StartAddress > ImageEnd))
 		return nullptr;
 
-	/* Add a few bytes to the StartAddress to prevent instantly returning the previous result */
-	uint8_t* SearchStart = StartAddress ? (reinterpret_cast<uint8_t*>(StartAddress) + 0x5) : reinterpret_cast<uint8_t*>(ImageBase);
-	DWORD SearchRange = StartAddress ? ImageEnd - StartAddress : ImageSize;
+	BYTE* Base = reinterpret_cast<BYTE*>(ImageBase);
+	IMAGE_DOS_HEADER* Dos = reinterpret_cast<IMAGE_DOS_HEADER*>(Base);
+	if (Dos->e_magic != IMAGE_DOS_SIGNATURE)
+		return nullptr;
 
-	if (Range != 0x0)
-		SearchRange = min(Range, SearchRange);
+	IMAGE_NT_HEADERS* Nt = reinterpret_cast<IMAGE_NT_HEADERS*>(Base + Dos->e_lfanew);
+	if (Nt->Signature != IMAGE_NT_SIGNATURE)
+		return nullptr;
 
-	if ((StartAddress + SearchRange) >= ImageEnd)
-		SearchRange -= OffsetFromMemoryEnd;
+	IMAGE_SECTION_HEADER* Sections = IMAGE_FIRST_SECTION(Nt);
 
-	const int32_t RefStrLen = StrlenHelper(RefStr);
+	if (Range == 0)
+		Range = Nt->OptionalHeader.SizeOfImage;
 
-	for (uintptr_t i = 0; i < SearchRange; i++)
-	{
-		// opcode: lea
-		if ((SearchStart[i] == uint8_t(0x4C) || SearchStart[i] == uint8_t(0x48)) && SearchStart[i + 1] == uint8_t(0x8D))
-		{
-			const uintptr_t StrPtr = ASMUtils::Resolve32BitRelativeLea(reinterpret_cast<uintptr_t>(SearchStart + i));
+	const int RefStrLen = StrlenHelper(RefStr);
+	constexpr int OffsetFromMemoryEnd = 0x10;
 
-			if (!IsInProcessRange(StrPtr))
-				continue;
+	for (int i = 0; i < Nt->FileHeader.NumberOfSections; ++i) {
+		IMAGE_SECTION_HEADER& Sec = Sections[i];
 
-			if (StrnCmpHelper(RefStr, reinterpret_cast<const CharType*>(StrPtr), RefStrLen))
-				return { SearchStart + i };
+		if (!(Sec.Characteristics & IMAGE_SCN_MEM_READ) || Sec.Misc.VirtualSize == 0)
+			continue;
 
-			if constexpr (bCheckIfLeaIsStrPtr)
-			{
-				const CharType* StrPtrContentFirst8Bytes = *reinterpret_cast<const CharType* const*>(StrPtr);
+		uintptr_t SecStart = ImageBase + Sec.VirtualAddress;
+		uintptr_t SecEnd = SecStart + Sec.Misc.VirtualSize;
 
-				if (!IsInProcessRange(StrPtrContentFirst8Bytes))
+		uintptr_t SearchStart = StartAddress ? max(StartAddress, SecStart) : SecStart;
+		uintptr_t SearchEnd = min(SecEnd, StartAddress + Range);
+
+		if (SearchStart >= SearchEnd)
+			continue;
+
+		BYTE* SearchStartPtr = reinterpret_cast<BYTE*>(SearchStart);
+		size_t SearchRange = SearchEnd - SearchStart;
+
+		for (size_t j = 0; j < SearchRange; ++j) {
+			if ((SearchStartPtr[j] == uint8_t(0x4C) || SearchStartPtr[j] == uint8_t(0x48)) && SearchStartPtr[j + 1] == uint8_t(0x8D)) {
+				const uintptr_t StrPtr = ASMUtils::Resolve32BitRelativeLea(reinterpret_cast<uintptr_t>(SearchStartPtr + j));
+
+				if (!IsInProcessRange(StrPtr))
 					continue;
 
-				if (StrnCmpHelper(RefStr, StrPtrContentFirst8Bytes, RefStrLen))
-					return { SearchStart + i };
+				if (StrnCmpHelper(RefStr, reinterpret_cast<const CharType*>(StrPtr), RefStrLen))
+					return { SearchStartPtr + j };
+
+				if constexpr (bCheckIfLeaIsStrPtr) {
+					const CharType* StrPtrContentFirst8Bytes = *reinterpret_cast<const CharType* const*>(StrPtr);
+
+					if (!IsInProcessRange(StrPtrContentFirst8Bytes))
+						continue;
+
+					if (StrnCmpHelper(RefStr, StrPtrContentFirst8Bytes, RefStrLen))
+						return { SearchStartPtr + j };
+				}
 			}
 		}
 	}
 
 	return nullptr;
 }
+
 
 template<typename Type = const char*>
 inline MemAddress FindUnrealExecFunctionByString(Type RefStr, void* StartAddress = nullptr)

@@ -84,6 +84,7 @@ void Generator::InitEngineCore()
 
 	ObjectArray::Init();
 	FName::Init();
+	//FName::Init(0x01BFF950, FName::EOffsetOverrideType::AppendString, true);
 	Off::Init();
 	PropertySizes::Init();
 	Off::InSDK::ProcessEvent::InitPE(); //Must be at this position, relies on offsets initialized in Off::Init()
