@@ -6,6 +6,7 @@
 #include <string>
 #include <algorithm>
 #include <functional>
+#include <format>
 
 
 /* Credits: https://en.cppreference.com/w/cpp/string/byte/tolower */
@@ -252,6 +253,24 @@ inline std::pair<uintptr_t, DWORD> GetSectionByName(uintptr_t ImageBase, const s
 	}
 
 	return { NULL, 0 };
+}
+
+inline std::vector<IMAGE_SECTION_HEADER> GetAllSections(uintptr_t ImageBase)
+{
+	if (ImageBase == 0)
+		return {};
+
+	const IMAGE_DOS_HEADER* DosHeader = reinterpret_cast<IMAGE_DOS_HEADER*>(ImageBase);
+	const IMAGE_NT_HEADERS* NtHeaders = reinterpret_cast<IMAGE_NT_HEADERS*>(ImageBase + DosHeader->e_lfanew);
+	IMAGE_SECTION_HEADER* Sections = IMAGE_FIRST_SECTION(NtHeaders);
+
+	std::vector<IMAGE_SECTION_HEADER> SectionList;
+	for (int i = 0; i < NtHeaders->FileHeader.NumberOfSections; i++)
+	{
+		SectionList.emplace_back(Sections[i]);
+	}
+
+	return SectionList;
 }
 
 inline uintptr_t GetOffset(const uintptr_t Address)
@@ -552,39 +571,59 @@ inline void* FindPatternInRange(const char* Signature, const uint8_t* Start, uin
 
 inline void* FindPattern(const char* Signature, uint32_t Offset = 0, bool bSearchAllSections = false, uintptr_t StartAddress = 0x0)
 {
-	//std::cerr << "StartAddr: " << StartAddress << "\n";
-
 	const auto [ImageBase, ImageSize] = GetImageBaseAndSize();
 
-	uintptr_t SearchStart = ImageBase;
-	uintptr_t SearchRange = ImageSize;
+	const uintptr_t SearchEnd = ImageBase + ImageSize;
+	if (StartAddress && (StartAddress < ImageBase || StartAddress >= SearchEnd))
+		return nullptr;
 
 	if (!bSearchAllSections)
 	{
 		const auto [TextSection, TextSize] = GetSectionByName(ImageBase, ".text");
 
-		if (TextSection != 0x0 && TextSize != 0x0)
+		if (TextSection && TextSize)
 		{
-			SearchStart = TextSection;
-			SearchRange = TextSize;
+			uintptr_t SecStart = TextSection;
+			uintptr_t SecEnd = TextSection + TextSize;
+
+			uintptr_t SearchStart = (StartAddress >= SecStart && StartAddress < SecEnd)
+				? (StartAddress + 1)
+				: SecStart;
+
+			uintptr_t SearchRange = SecEnd - SearchStart;
+
+			return FindPatternInRange(Signature, reinterpret_cast<uint8_t*>(SearchStart), SearchRange, Offset != 0x0, Offset);
 		}
-		else
+
+		bSearchAllSections = true;
+	}
+
+	if (bSearchAllSections)
+	{
+		for (const auto& Sec : GetAllSections(ImageBase))
 		{
-			bSearchAllSections = true;
+			if (!(Sec.Characteristics & IMAGE_SCN_MEM_READ) || Sec.Misc.VirtualSize == 0)
+				continue;
+
+			uintptr_t SecStart = ImageBase + Sec.VirtualAddress;
+			uintptr_t SecEnd = SecStart + Sec.Misc.VirtualSize;
+
+			if (SecStart >= SecEnd)
+				continue;
+
+			uintptr_t SearchStart = (StartAddress >= SecStart && StartAddress < SecEnd)
+				? (StartAddress + 0x1) : SecStart;
+
+			if (SearchStart >= SecEnd)
+				continue;
+
+			uintptr_t SearchRange = SecEnd - SearchStart;
+			if (void* Found = FindPatternInRange(Signature, reinterpret_cast<uint8_t*>(SearchStart), SearchRange, Offset != 0x0, Offset))
+				return Found;
 		}
 	}
 
-	const uintptr_t SearchEnd = ImageBase + SearchRange;
-
-	/* If the StartAddress is not default nullptr, and is out of memory-range */
-	if (StartAddress != 0x0 && (StartAddress < SearchStart || StartAddress >= SearchEnd))
-		return nullptr;
-
-	/* Add a byte to the StartAddress to prevent instantly returning the previous result */
-	SearchStart = StartAddress != 0x0 ? (StartAddress + 0x1) : ImageBase;
-	SearchRange = StartAddress != 0x0 ? SearchEnd - StartAddress : ImageSize;
-
-	return FindPatternInRange(Signature, reinterpret_cast<uint8_t*>(SearchStart), SearchRange, Offset != 0x0, Offset);
+	return nullptr;
 }
 
 
@@ -949,7 +988,7 @@ template<bool bCheckIfLeaIsStrPtr = false, typename CharType = char>
 inline MemAddress FindByStringInAllSections(const CharType* RefStr, uintptr_t StartAddress = 0x0, int32_t Range = 0x0)
 {
 	static_assert(std::is_same_v<CharType, char> || std::is_same_v<CharType, wchar_t>,
-		"FindByStringInAllSections only supports 'char' and 'wchar_t'.");
+		"FindByStringInAllSections only supports 'char' and 'wchar_t', but was called with other type.");
 
 	const auto [ImageBase, ImageSize] = GetImageBaseAndSize();
 	uintptr_t ImageEnd = ImageBase + ImageSize;
@@ -959,32 +998,22 @@ inline MemAddress FindByStringInAllSections(const CharType* RefStr, uintptr_t St
 
 	BYTE* Base = reinterpret_cast<BYTE*>(ImageBase);
 	IMAGE_DOS_HEADER* Dos = reinterpret_cast<IMAGE_DOS_HEADER*>(Base);
-	if (Dos->e_magic != IMAGE_DOS_SIGNATURE)
-		return nullptr;
-
 	IMAGE_NT_HEADERS* Nt = reinterpret_cast<IMAGE_NT_HEADERS*>(Base + Dos->e_lfanew);
-	if (Nt->Signature != IMAGE_NT_SIGNATURE)
-		return nullptr;
 
-	IMAGE_SECTION_HEADER* Sections = IMAGE_FIRST_SECTION(Nt);
-
-	if (Range == 0)
+	if (Range == 0x0)
 		Range = Nt->OptionalHeader.SizeOfImage;
 
 	const int RefStrLen = StrlenHelper(RefStr);
-	constexpr int OffsetFromMemoryEnd = 0x10;
 
-	for (int i = 0; i < Nt->FileHeader.NumberOfSections; ++i) {
-		IMAGE_SECTION_HEADER& Sec = Sections[i];
-
+	for (const auto& Sec : GetAllSections(ImageBase)) {
 		if (!(Sec.Characteristics & IMAGE_SCN_MEM_READ) || Sec.Misc.VirtualSize == 0)
 			continue;
 
 		uintptr_t SecStart = ImageBase + Sec.VirtualAddress;
 		uintptr_t SecEnd = SecStart + Sec.Misc.VirtualSize;
 
-		uintptr_t SearchStart = StartAddress ? max(StartAddress, SecStart) : SecStart;
-		uintptr_t SearchEnd = min(SecEnd, StartAddress + Range);
+		uintptr_t SearchStart = StartAddress ? max(StartAddress + 0x5, SecStart) : SecStart;
+		uintptr_t SearchEnd = StartAddress ? min(SecEnd, StartAddress + Range) : SecEnd;
 
 		if (SearchStart >= SearchEnd)
 			continue;
@@ -1002,14 +1031,15 @@ inline MemAddress FindByStringInAllSections(const CharType* RefStr, uintptr_t St
 				if (StrnCmpHelper(RefStr, reinterpret_cast<const CharType*>(StrPtr), RefStrLen))
 					return { SearchStartPtr + j };
 
-				if constexpr (bCheckIfLeaIsStrPtr) {
+				if constexpr (bCheckIfLeaIsStrPtr)
+				{
 					const CharType* StrPtrContentFirst8Bytes = *reinterpret_cast<const CharType* const*>(StrPtr);
 
 					if (!IsInProcessRange(StrPtrContentFirst8Bytes))
 						continue;
 
 					if (StrnCmpHelper(RefStr, StrPtrContentFirst8Bytes, RefStrLen))
-						return { SearchStartPtr + j };
+						return { SearchStart + j };
 				}
 			}
 		}
@@ -1017,7 +1047,6 @@ inline MemAddress FindByStringInAllSections(const CharType* RefStr, uintptr_t St
 
 	return nullptr;
 }
-
 
 template<typename Type = const char*>
 inline MemAddress FindUnrealExecFunctionByString(Type RefStr, void* StartAddress = nullptr)
