@@ -412,7 +412,7 @@ bool NameArray::TryFindNamePool()
 	/* Singleton instance of FNamePool, which is passed as a parameter to FNamePool::FNamePool */
 	void* NamePoolIntance = nullptr;
 
-	uintptr_t SigOccurrence = 0x0;;
+	uintptr_t SigOccurrence = 0x0;
 
 	uintptr_t Counter = 0x0;
 
