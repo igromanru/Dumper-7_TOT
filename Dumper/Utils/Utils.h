@@ -351,6 +351,24 @@ inline bool IsBadReadPtr(const uintptr_t Ptr)
 	return IsBadReadPtr(reinterpret_cast<const void*>(Ptr));
 }
 
+inline bool IsInReadableSection(const uintptr_t Ptr, std::vector<IMAGE_SECTION_HEADER>& Sections, const uintptr_t ImageBase) {
+	for (const auto& Sec : Sections) {
+		if (!(Sec.Characteristics & IMAGE_SCN_MEM_READ) || Sec.Misc.VirtualSize == 0)
+			continue;
+
+		uintptr_t secStart = ImageBase + Sec.VirtualAddress;
+		uintptr_t secEnd = secStart + Sec.Misc.VirtualSize;
+
+		if (Ptr >= secStart && Ptr < secEnd)
+			return true;
+	}
+	return false;
+}
+
+inline bool IsInReadableSection(const void* Ptr, std::vector<IMAGE_SECTION_HEADER>& Sections, const uintptr_t ImageBase) {
+	return IsInReadableSection(reinterpret_cast<const uintptr_t>(Ptr), Sections, ImageBase);
+}
+
 inline void* GetModuleAddress(const char* SearchModuleName)
 {
 	LDR_DATA_TABLE_ENTRY* Entry = GetModuleLdrTableEntry(SearchModuleName);
@@ -940,7 +958,7 @@ inline MemAddress FindByString(Type RefStr)
 
 	const auto [RDataSection, RDataSize] = GetSectionByName(ImageBase, ".rdata");
 	const auto [TextSection, TextSize] = GetSectionByName(ImageBase, ".text");
-	
+
 	if (!RDataSection || !TextSection)
 		return nullptr;
 
@@ -964,7 +982,7 @@ inline MemAddress FindByString(Type RefStr)
 	{
 		// opcode: lea
 		const uint8_t CurrentByte = *reinterpret_cast<const uint8_t*>(TextSection + i);
-		const uint8_t NextByte    = *reinterpret_cast<const uint8_t*>(TextSection + i + 0x1);
+		const uint8_t NextByte = *reinterpret_cast<const uint8_t*>(TextSection + i + 0x1);
 
 		if ((CurrentByte == 0x4C || CurrentByte == 0x48) && NextByte == 0x8D)
 		{
@@ -1005,7 +1023,9 @@ inline MemAddress FindByStringInAllSections(const CharType* RefStr, uintptr_t St
 
 	const int RefStrLen = StrlenHelper(RefStr);
 
-	for (const auto& Sec : GetAllSections(ImageBase)) {
+	auto Sections = GetAllSections(ImageBase);
+
+	for (const auto& Sec : Sections) {
 		if (!(Sec.Characteristics & IMAGE_SCN_MEM_READ) || Sec.Misc.VirtualSize == 0)
 			continue;
 
@@ -1025,7 +1045,7 @@ inline MemAddress FindByStringInAllSections(const CharType* RefStr, uintptr_t St
 			if ((SearchStartPtr[j] == uint8_t(0x4C) || SearchStartPtr[j] == uint8_t(0x48)) && SearchStartPtr[j + 1] == uint8_t(0x8D)) {
 				const uintptr_t StrPtr = ASMUtils::Resolve32BitRelativeLea(reinterpret_cast<uintptr_t>(SearchStartPtr + j));
 
-				if (!IsInProcessRange(StrPtr))
+				if (!IsInProcessRange(StrPtr) || !IsInReadableSection(StrPtr, Sections, ImageBase))
 					continue;
 
 				if (StrnCmpHelper(RefStr, reinterpret_cast<const CharType*>(StrPtr), RefStrLen))
@@ -1035,7 +1055,7 @@ inline MemAddress FindByStringInAllSections(const CharType* RefStr, uintptr_t St
 				{
 					const CharType* StrPtrContentFirst8Bytes = *reinterpret_cast<const CharType* const*>(StrPtr);
 
-					if (!IsInProcessRange(StrPtrContentFirst8Bytes))
+					if (!IsInProcessRange(StrPtrContentFirst8Bytes) || !IsInReadableSection(StrPtrContentFirst8Bytes, Sections, ImageBase))
 						continue;
 
 					if (StrnCmpHelper(RefStr, StrPtrContentFirst8Bytes, RefStrLen))
